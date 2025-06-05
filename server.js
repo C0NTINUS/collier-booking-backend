@@ -53,14 +53,21 @@ app.post('/api/timeslots', async (req, res) => {
       timeMax: timeMax,
       singleEvents: true,
       orderBy: "startTime",
+      showDeleted: false,
+      showHiddenInvitations: false,
     });
 
     const bookedSlots = eventsResponse.data.items || [];
     console.log('Booked slots:', bookedSlots.map(event => ({
+      id: event.id,
       summary: event.summary,
-      start: event.start.dateTime,
-      end: event.end.dateTime,
-      room: event.summary ? determineRoom(event.summary) : null
+      start: event.start.dateTime || event.start.date,
+      end: event.end.dateTime || event.end.date,
+      startTz: event.start.timeZone,
+      endTz: event.end.timeZone,
+      room: event.summary ? extractRoom(event.summary) : null,
+      visibility: event.visibility,
+      status: event.status
     })));
 
     const timeSlots = [
@@ -78,7 +85,7 @@ app.post('/api/timeslots', async (req, res) => {
         const eventStart = event.start.dateTime || event.start.date;
         const eventEnd = event.end.dateTime || event.end.date;
         const eventTitle = event.summary || "";
-        const eventRoom = determineRoom(eventTitle);
+        const eventRoom = extractRoom(eventTitle);
         const overlap = slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
         console.log(`Checking slot ${slot} (${slotStart} to ${slotEnd}) against event "${eventTitle}" (${eventStart} to ${eventEnd}, room: ${eventRoom}, requested room: ${room}) - Overlap: ${overlap}`);
         return overlap;
@@ -97,6 +104,10 @@ app.post('/api/timeslots', async (req, res) => {
     res.json({ availableSlots });
   } catch (error) {
     console.error("Error fetching events:", error);
+    if (error.response && error.response.status === 403) {
+      console.error('Insufficient permissions to read events on this calendar.');
+      return res.status(403).json({ error: 'Insufficient permissions to read events on this calendar.' });
+    }
     res.status(500).json({ error: 'Failed to fetch time slots' });
   }
 });
@@ -114,7 +125,7 @@ app.post('/api/book', async (req, res) => {
     // Retry mechanism to handle race conditions
     let isSlotBooked = true;
     let insertResponse = null;
-    const maxRetries = 3;
+    const maxRetries = 5; // Increased retries
     let attempt = 0;
 
     while (attempt < maxRetries && isSlotBooked) {
@@ -130,9 +141,23 @@ app.post('/api/book', async (req, res) => {
         timeMax: timeMax,
         singleEvents: true,
         orderBy: "startTime",
+        showDeleted: false,
+        showHiddenInvitations: false,
       });
 
       const bookedSlots = eventsResponse.data.items || [];
+      console.log('Booked slots during booking check:', bookedSlots.map(event => ({
+        id: event.id,
+        summary: event.summary,
+        start: event.start.dateTime || event.start.date,
+        end: event.end.dateTime || event.end.date,
+        startTz: event.start.timeZone,
+        endTz: event.end.timeZone,
+        room: event.summary ? extractRoom(event.summary) : null,
+        visibility: event.visibility,
+        status: event.status
+      })));
+
       const slotStart = convertTimeSlotToISO(date, time);
       const slotEnd = new Date(new Date(slotStart).getTime() + duration * 60000).toISOString();
 
@@ -140,7 +165,7 @@ app.post('/api/book', async (req, res) => {
         const eventStart = event.start.dateTime || event.start.date;
         const eventEnd = event.end.dateTime || event.end.date;
         const eventTitle = event.summary || "";
-        const eventRoom = determineRoom(eventTitle);
+        const eventRoom = extractRoom(eventTitle);
         const overlap = slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
         if (overlap) {
           console.log(`Conflict detected: Slot ${time} on ${date} for ${room} overlaps with event "${eventTitle}" (${eventStart} to ${eventEnd})`);
@@ -153,8 +178,8 @@ app.post('/api/book', async (req, res) => {
           console.log(`Booking rejected after ${maxRetries} attempts: Slot ${time} on ${date} for ${room} is already taken.`);
           return res.status(409).json({ error: 'This time slot is already booked.' });
         }
-        // Wait before retrying to reduce race condition likelihood
-        await new Promise(resolve => setTimeout(resolve, 500));
+        // Wait before retrying to reduce race condition likelihood and allow API to sync
+        await new Promise(resolve => setTimeout(resolve, 1000));
         continue;
       }
 
@@ -174,6 +199,7 @@ app.post('/api/book', async (req, res) => {
           timeZone: 'America/Chicago',
         },
         attendees: [{ email }],
+        visibility: 'default', // Ensure event is visible
       };
 
       console.log('Creating event:', event);
@@ -185,9 +211,50 @@ app.post('/api/book', async (req, res) => {
       console.log(`Event created successfully: ${insertResponse.data.id}`);
     }
 
+    // Final check to ensure the event was created and no duplicate exists
+    const timeMinFinal = new Date(date + "T00:00:00-05:00").toISOString();
+    const timeMaxFinal = new Date(date + "T23:59:59-05:00").toISOString();
+    const finalCheckResponse = await calendar.events.list({
+      calendarId: LEADERSHIP_CALENDAR_ID,
+      timeMin: timeMinFinal,
+      timeMax: timeMaxFinal,
+      singleEvents: true,
+      orderBy: "startTime",
+      showDeleted: false,
+      showHiddenInvitations: false,
+    });
+
+    const finalBookedSlots = finalCheckResponse.data.items || [];
+    const slotStart = convertTimeSlotToISO(date, time);
+    const slotEnd = new Date(new Date(slotStart).getTime() + duration * 60000).toISOString();
+
+    const duplicates = finalBookedSlots.filter(event => {
+      const eventStart = event.start.dateTime || event.start.date;
+      const eventEnd = event.end.dateTime || event.end.date;
+      const eventTitle = event.summary || "";
+      const eventRoom = extractRoom(eventTitle);
+      const overlap = slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
+      return overlap;
+    });
+
+    if (duplicates.length > 1) {
+      console.log(`Duplicate bookings detected for slot ${time} on ${date} for ${room}:`, duplicates);
+      // Delete the newly created event to prevent duplicates
+      await calendar.events.delete({
+        calendarId: LEADERSHIP_CALENDAR_ID,
+        eventId: insertResponse.data.id,
+      });
+      console.log(`Deleted duplicate event: ${insertResponse.data.id}`);
+      return res.status(409).json({ error: 'This time slot was booked by another user during your request.' });
+    }
+
     res.json({ success: true, eventId: insertResponse.data.id });
   } catch (error) {
     console.error("Error creating event:", error);
+    if (error.response && error.response.status === 403) {
+      console.error('Insufficient permissions to create events on this calendar.');
+      return res.status(403).json({ error: 'Insufficient permissions to create events on this calendar.' });
+    }
     res.status(500).json({ error: 'Failed to create booking' });
   }
 });
@@ -202,7 +269,7 @@ function convertTimeSlotToISO(dateStr, timeStr) {
   return date.toISOString();
 }
 
-function determineRoom(summary) {
+function extractRoom(summary) {
   if (!summary) return null;
   const summaryLower = summary.toLowerCase();
   if (summaryLower.includes("fayetteville office")) return "fayetteville";
