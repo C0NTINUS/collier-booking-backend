@@ -39,12 +39,14 @@ app.post('/api/timeslots', async (req, res) => {
   const { date, room, duration } = req.body;
 
   if (!date || !room || !duration) {
+    console.log('Request missing required fields:', req.body);
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
   try {
     const timeMin = new Date(date + "T00:00:00").toISOString();
     const timeMax = new Date(date + "T23:59:59").toISOString();
+    console.log(`Fetching events for date ${date} from ${timeMin} to ${timeMax}`);
     const response = await calendar.events.list({
       calendarId: LEADERSHIP_CALENDAR_ID,
       timeMin: timeMin,
@@ -54,6 +56,13 @@ app.post('/api/timeslots', async (req, res) => {
     });
 
     const bookedSlots = response.data.items || [];
+    console.log('Booked slots:', bookedSlots.map(event => ({
+      summary: event.summary,
+      start: event.start.dateTime,
+      end: event.end.dateTime,
+      room: event.summary.includes("Fayetteville") ? "fayetteville" : event.summary.includes("Rogers") ? "rogers" : null
+    })));
+
     const timeSlots = [
       "8:00 AM", "8:30 AM", "9:00 AM", "9:30 AM", "10:00 AM", "10:30 AM",
       "11:00 AM", "11:30 AM", "12:00 PM", "12:30 PM", "1:00 PM", "1:30 PM",
@@ -65,15 +74,26 @@ app.post('/api/timeslots', async (req, res) => {
       const slotStart = convertTimeSlotToISO(date, slot);
       const slotEnd = new Date(new Date(slotStart).getTime() + duration * 60000).toISOString();
 
-      return !bookedSlots.some(event => {
+      const isBooked = bookedSlots.some(event => {
         const eventStart = event.start.dateTime || event.start.date;
         const eventEnd = event.end.dateTime || event.end.date;
         const eventTitle = event.summary || "";
         const eventRoom = eventTitle.includes("Fayetteville") ? "fayetteville" : eventTitle.includes("Rogers") ? "rogers" : null;
-        return slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
+        const overlap = slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
+        console.log(`Checking slot ${slot} (${slotStart} to ${slotEnd}) against event "${eventTitle}" (${eventStart} to ${eventEnd}, room: ${eventRoom}, requested room: ${room}) - Overlap: ${overlap}`);
+        return overlap;
       });
+
+      if (isBooked) {
+        console.log(`Slot ${slot} is booked and will be excluded.`);
+      } else {
+        console.log(`Slot ${slot} is available.`);
+      }
+
+      return !isBooked;
     });
 
+    console.log('Available slots:', availableSlots);
     res.json({ availableSlots });
   } catch (error) {
     console.error("Error fetching events:", error);
@@ -86,10 +106,44 @@ app.post('/api/book', async (req, res) => {
   const { date, time, room, duration, agentName, email, description } = req.body;
 
   if (!date || !time || !room || !duration || !agentName || !email || !description) {
+    console.log('Booking request missing required fields:', req.body);
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
   try {
+    // Check if the slot is already booked before creating the event
+    const timeMin = new Date(date + "T00:00:00").toISOString();
+    const timeMax = new Date(date + "T23:59:59").toISOString();
+    const response = await calendar.events.list({
+      calendarId: LEADERSHIP_CALENDAR_ID,
+      timeMin: timeMin,
+      timeMax: timeMax,
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+
+    const bookedSlots = response.data.items || [];
+    const slotStart = convertTimeSlotToISO(date, time);
+    const slotEnd = new Date(new Date(slotStart).getTime() + duration * 60000).toISOString();
+
+    const isSlotBooked = bookedSlots.some(event => {
+      const eventStart = event.start.dateTime || event.start.date;
+      const eventEnd = event.end.dateTime || event.end.date;
+      const eventTitle = event.summary || "";
+      const eventRoom = eventTitle.includes("Fayetteville") ? "fayetteville" : eventTitle.includes("Rogers") ? "rogers" : null;
+      const overlap = slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
+      if (overlap) {
+        console.log(`Conflict detected: Slot ${time} on ${date} for ${room} overlaps with event "${eventTitle}" (${eventStart} to ${eventEnd})`);
+      }
+      return overlap;
+    });
+
+    if (isSlotBooked) {
+      console.log(`Booking rejected: Slot ${time} on ${date} for ${room} is already taken.`);
+      return res.status(409).json({ error: 'This time slot is already booked.' });
+    }
+
+    // Proceed with booking
     const startTime = convertTimeSlotToISO(date, time);
     const endTime = new Date(new Date(startTime).getTime() + duration * 60000).toISOString();
 
@@ -107,11 +161,13 @@ app.post('/api/book', async (req, res) => {
       attendees: [{ email }],
     };
 
+    console.log('Creating event:', event);
     const response = await calendar.events.insert({
       calendarId: LEADERSHIP_CALENDAR_ID,
       resource: event,
     });
 
+    console.log(`Event created successfully: ${response.data.id}`);
     res.json({ success: true, eventId: response.data.id });
   } catch (error) {
     console.error("Error creating event:", error);
@@ -125,6 +181,7 @@ function convertTimeSlotToISO(dateStr, timeStr) {
   if (period === "PM" && hours !== 12) hours += 12;
   if (period === "AM" && hours === 12) hours = 0;
   const date = new Date(`${dateStr}T${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:00-05:00`);
+  console.log(`Converted ${timeStr} on ${dateStr} to ISO: ${date.toISOString()}`);
   return date.toISOString();
 }
 
