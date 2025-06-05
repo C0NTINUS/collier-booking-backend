@@ -1,8 +1,6 @@
 const express = require('express');
 const { google } = require('googleapis');
 const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -29,7 +27,6 @@ const auth = new google.auth.OAuth2(
   'https://localhost'
 );
 
-// Set the refresh token
 auth.setCredentials({
   refresh_token: credentials.refresh_token
 });
@@ -127,7 +124,7 @@ function convertTimeSlotToISO(dateStr, timeStr) {
   let [hours, minutes] = time.split(":").map(Number);
   if (period === "PM" && hours !== 12) hours += 12;
   if (period === "AM" && hours === 12) hours = 0;
-  const date = new Date(`${dateStr}T${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:00`);
+  const date = new Date(`${dateStr}T${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:00-05:00`);
   return date.toISOString();
 }
 
