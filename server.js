@@ -1,11 +1,37 @@
 const express = require('express');
 const { google } = require('googleapis');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+// Write credentials to a temporary file
+const credentialsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+console.log('GOOGLE_APPLICATION_CREDENTIALS_JSON:', credentialsJson);
+
+let credentials;
+try {
+  credentials = JSON.parse(credentialsJson);
+  console.log('Parsed credentials:', credentials);
+} catch (error) {
+  console.error('Error parsing GOOGLE_APPLICATION_CREDENTIALS_JSON:', error);
+  throw error;
+}
+
+// Write credentials to a temporary file
+const tempCredentialsPath = path.join('/tmp', 'gcloud-credentials.json');
+try {
+  fs.writeFileSync(tempCredentialsPath, JSON.stringify(credentials));
+  console.log('Credentials written to:', tempCredentialsPath);
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = tempCredentialsPath;
+} catch (error) {
+  console.error('Error writing credentials to temporary file:', error);
+  throw error;
+}
 
 const auth = new google.auth.GoogleAuth({
   scopes: ['https://www.googleapis.com/auth/calendar.readonly']
@@ -72,4 +98,3 @@ function convertTimeSlotToISO(dateStr, timeStr) {
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
-
