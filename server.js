@@ -60,7 +60,7 @@ app.post('/api/timeslots', async (req, res) => {
       summary: event.summary,
       start: event.start.dateTime,
       end: event.end.dateTime,
-      room: event.summary && event.summary.includes("Fayetteville") ? "fayetteville" : event.summary && event.summary.includes("Rogers") ? "rogers" : null
+      room: event.summary ? determineRoom(event.summary) : null
     })));
 
     const timeSlots = [
@@ -78,7 +78,7 @@ app.post('/api/timeslots', async (req, res) => {
         const eventStart = event.start.dateTime || event.start.date;
         const eventEnd = event.end.dateTime || event.end.date;
         const eventTitle = event.summary || "";
-        const eventRoom = eventTitle.includes("Fayetteville") ? "fayetteville" : eventTitle.includes("Rogers") ? "rogers" : null;
+        const eventRoom = determineRoom(eventTitle);
         const overlap = slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
         console.log(`Checking slot ${slot} (${slotStart} to ${slotEnd}) against event "${eventTitle}" (${eventStart} to ${eventEnd}, room: ${eventRoom}, requested room: ${room}) - Overlap: ${overlap}`);
         return overlap;
@@ -111,63 +111,80 @@ app.post('/api/book', async (req, res) => {
   }
 
   try {
-    // Check if the slot is already booked before creating the event
-    const timeMin = new Date(date + "T00:00:00-05:00").toISOString();
-    const timeMax = new Date(date + "T23:59:59-05:00").toISOString();
-    const eventsResponse = await calendar.events.list({
-      calendarId: LEADERSHIP_CALENDAR_ID,
-      timeMin: timeMin,
-      timeMax: timeMax,
-      singleEvents: true,
-      orderBy: "startTime",
-    });
+    // Retry mechanism to handle race conditions
+    let isSlotBooked = true;
+    let insertResponse = null;
+    const maxRetries = 3;
+    let attempt = 0;
 
-    const bookedSlots = eventsResponse.data.items || [];
-    const slotStart = convertTimeSlotToISO(date, time);
-    const slotEnd = new Date(new Date(slotStart).getTime() + duration * 60000).toISOString();
+    while (attempt < maxRetries && isSlotBooked) {
+      attempt++;
+      console.log(`Attempt ${attempt} to book slot ${time} on ${date} for ${room}`);
 
-    const isSlotBooked = bookedSlots.some(event => {
-      const eventStart = event.start.dateTime || event.start.date;
-      const eventEnd = event.end.dateTime || event.end.date;
-      const eventTitle = event.summary || "";
-      const eventRoom = eventTitle.includes("Fayetteville") ? "fayetteville" : eventTitle.includes("Rogers") ? "rogers" : null;
-      const overlap = slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
-      if (overlap) {
-        console.log(`Conflict detected: Slot ${time} on ${date} for ${room} overlaps with event "${eventTitle}" (${eventStart} to ${eventEnd})`);
+      // Check if the slot is already booked
+      const timeMin = new Date(date + "T00:00:00-05:00").toISOString();
+      const timeMax = new Date(date + "T23:59:59-05:00").toISOString();
+      const eventsResponse = await calendar.events.list({
+        calendarId: LEADERSHIP_CALENDAR_ID,
+        timeMin: timeMin,
+        timeMax: timeMax,
+        singleEvents: true,
+        orderBy: "startTime",
+      });
+
+      const bookedSlots = eventsResponse.data.items || [];
+      const slotStart = convertTimeSlotToISO(date, time);
+      const slotEnd = new Date(new Date(slotStart).getTime() + duration * 60000).toISOString();
+
+      isSlotBooked = bookedSlots.some(event => {
+        const eventStart = event.start.dateTime || event.start.date;
+        const eventEnd = event.end.dateTime || event.end.date;
+        const eventTitle = event.summary || "";
+        const eventRoom = determineRoom(eventTitle);
+        const overlap = slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
+        if (overlap) {
+          console.log(`Conflict detected: Slot ${time} on ${date} for ${room} overlaps with event "${eventTitle}" (${eventStart} to ${eventEnd})`);
+        }
+        return overlap;
+      });
+
+      if (isSlotBooked) {
+        if (attempt === maxRetries) {
+          console.log(`Booking rejected after ${maxRetries} attempts: Slot ${time} on ${date} for ${room} is already taken.`);
+          return res.status(409).json({ error: 'This time slot is already booked.' });
+        }
+        // Wait before retrying to reduce race condition likelihood
+        await new Promise(resolve => setTimeout(resolve, 500));
+        continue;
       }
-      return overlap;
-    });
 
-    if (isSlotBooked) {
-      console.log(`Booking rejected: Slot ${time} on ${date} for ${room} is already taken.`);
-      return res.status(409).json({ error: 'This time slot is already booked.' });
+      // Proceed with booking if the slot is available
+      const startTime = convertTimeSlotToISO(date, time);
+      const endTime = new Date(new Date(startTime).getTime() + duration * 60000).toISOString();
+
+      const event = {
+        summary: `Booking - ${room.charAt(0).toUpperCase() + room.slice(1)} Office - Agent: ${agentName} - ${description}`,
+        description: `Agent: ${agentName}\nEmail: ${email}\nPurpose: ${description}`,
+        start: {
+          dateTime: startTime,
+          timeZone: 'America/Chicago',
+        },
+        end: {
+          dateTime: endTime,
+          timeZone: 'America/Chicago',
+        },
+        attendees: [{ email }],
+      };
+
+      console.log('Creating event:', event);
+      insertResponse = await calendar.events.insert({
+        calendarId: LEADERSHIP_CALENDAR_ID,
+        resource: event,
+      });
+
+      console.log(`Event created successfully: ${insertResponse.data.id}`);
     }
 
-    // Proceed with booking
-    const startTime = convertTimeSlotToISO(date, time);
-    const endTime = new Date(new Date(startTime).getTime() + duration * 60000).toISOString();
-
-    const event = {
-      summary: `Booking - ${room.charAt(0).toUpperCase() + room.slice(1)} Office - Agent: ${agentName} - ${description}`,
-      description: `Agent: ${agentName}\nEmail: ${email}\nPurpose: ${description}`,
-      start: {
-        dateTime: startTime,
-        timeZone: 'America/Chicago',
-      },
-      end: {
-        dateTime: endTime,
-        timeZone: 'America/Chicago',
-      },
-      attendees: [{ email }],
-    };
-
-    console.log('Creating event:', event);
-    const insertResponse = await calendar.events.insert({
-      calendarId: LEADERSHIP_CALENDAR_ID,
-      resource: event,
-    });
-
-    console.log(`Event created successfully: ${insertResponse.data.id}`);
     res.json({ success: true, eventId: insertResponse.data.id });
   } catch (error) {
     console.error("Error creating event:", error);
@@ -183,6 +200,14 @@ function convertTimeSlotToISO(dateStr, timeStr) {
   const date = new Date(`${dateStr}T${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:00-05:00`);
   console.log(`Converted ${timeStr} on ${dateStr} to ISO: ${date.toISOString()}`);
   return date.toISOString();
+}
+
+function determineRoom(summary) {
+  if (!summary) return null;
+  const summaryLower = summary.toLowerCase();
+  if (summaryLower.includes("fayetteville office")) return "fayetteville";
+  if (summaryLower.includes("rogers office")) return "rogers";
+  return null;
 }
 
 app.listen(port, () => {
