@@ -81,13 +81,20 @@ app.post('/api/timeslots', async (req, res) => {
       const slotStart = convertTimeSlotToISO(date, slot);
       const slotEnd = new Date(new Date(slotStart).getTime() + duration * 60000).toISOString();
 
+      const slotStartDate = new Date(slotStart);
+      const slotEndDate = new Date(slotEnd);
+
       const isBooked = bookedSlots.some(event => {
         const eventStart = event.start.dateTime || event.start.date;
         const eventEnd = event.end.dateTime || event.end.date;
         const eventTitle = event.summary || "";
         const eventRoom = extractRoom(eventTitle);
-        const overlap = slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
-        console.log(`Checking slot ${slot} (${slotStart} to ${slotEnd}) against event "${eventTitle}" (${eventStart} to ${eventEnd}, room: ${eventRoom}, requested room: ${room}) - Overlap: ${overlap}`);
+
+        const eventStartDate = new Date(eventStart);
+        const eventEndDate = new Date(eventEnd);
+
+        const overlap = slotStartDate < eventEndDate && slotEndDate > eventStartDate && eventRoom === room;
+        console.log(`Checking slot ${slot} (${slotStartDate.toISOString()} to ${slotEndDate.toISOString()}) against event "${eventTitle}" (${eventStartDate.toISOString()} to ${eventEndDate.toISOString()}, room: ${eventRoom}, requested room: ${room}) - Overlap: ${overlap}`);
         return overlap;
       });
 
@@ -125,7 +132,7 @@ app.post('/api/book', async (req, res) => {
     // Retry mechanism to handle race conditions
     let isSlotBooked = true;
     let insertResponse = null;
-    const maxRetries = 5; // Increased retries
+    const maxRetries = 5;
     let attempt = 0;
 
     while (attempt < maxRetries && isSlotBooked) {
@@ -161,14 +168,21 @@ app.post('/api/book', async (req, res) => {
       const slotStart = convertTimeSlotToISO(date, time);
       const slotEnd = new Date(new Date(slotStart).getTime() + duration * 60000).toISOString();
 
+      const slotStartDate = new Date(slotStart);
+      const slotEndDate = new Date(slotEnd);
+
       isSlotBooked = bookedSlots.some(event => {
         const eventStart = event.start.dateTime || event.start.date;
         const eventEnd = event.end.dateTime || event.end.date;
         const eventTitle = event.summary || "";
         const eventRoom = extractRoom(eventTitle);
-        const overlap = slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
+
+        const eventStartDate = new Date(eventStart);
+        const eventEndDate = new Date(eventEnd);
+
+        const overlap = slotStartDate < eventEndDate && slotEndDate > eventStartDate && eventRoom === room;
         if (overlap) {
-          console.log(`Conflict detected: Slot ${time} on ${date} for ${room} overlaps with event "${eventTitle}" (${eventStart} to ${eventEnd})`);
+          console.log(`Conflict detected: Slot ${time} on ${date} for ${room} overlaps with event "${eventTitle}" (${eventStartDate.toISOString()} to ${eventEndDate.toISOString()})`);
         }
         return overlap;
       });
@@ -199,7 +213,7 @@ app.post('/api/book', async (req, res) => {
           timeZone: 'America/Chicago',
         },
         attendees: [{ email }],
-        visibility: 'default', // Ensure event is visible
+        visibility: 'default',
       };
 
       console.log('Creating event:', event);
@@ -211,7 +225,7 @@ app.post('/api/book', async (req, res) => {
       console.log(`Event created successfully: ${insertResponse.data.id}`);
     }
 
-    // Final check to ensure the event was created and no duplicate exists
+    // Final check to ensure no duplicates
     const timeMinFinal = new Date(date + "T00:00:00-05:00").toISOString();
     const timeMaxFinal = new Date(date + "T23:59:59-05:00").toISOString();
     const finalCheckResponse = await calendar.events.list({
@@ -228,18 +242,24 @@ app.post('/api/book', async (req, res) => {
     const slotStart = convertTimeSlotToISO(date, time);
     const slotEnd = new Date(new Date(slotStart).getTime() + duration * 60000).toISOString();
 
+    const slotStartDate = new Date(slotStart);
+    const slotEndDate = new Date(slotEnd);
+
     const duplicates = finalBookedSlots.filter(event => {
       const eventStart = event.start.dateTime || event.start.date;
       const eventEnd = event.end.dateTime || event.end.date;
       const eventTitle = event.summary || "";
       const eventRoom = extractRoom(eventTitle);
-      const overlap = slotStart < eventEnd && slotEnd > eventStart && eventRoom === room;
+
+      const eventStartDate = new Date(eventStart);
+      const eventEndDate = new Date(eventEnd);
+
+      const overlap = slotStartDate < eventEndDate && slotEndDate > eventStartDate && eventRoom === room;
       return overlap;
     });
 
     if (duplicates.length > 1) {
       console.log(`Duplicate bookings detected for slot ${time} on ${date} for ${room}:`, duplicates);
-      // Delete the newly created event to prevent duplicates
       await calendar.events.delete({
         calendarId: LEADERSHIP_CALENDAR_ID,
         eventId: insertResponse.data.id,
