@@ -44,10 +44,10 @@ app.post('/api/timeslots', async (req, res) => {
   }
 
   try {
-    const timeMin = new Date(date + "T00:00:00").toISOString();
-    const timeMax = new Date(date + "T23:59:59").toISOString();
+    const timeMin = new Date(date + "T00:00:00-05:00").toISOString();
+    const timeMax = new Date(date + "T23:59:59-05:00").toISOString();
     console.log(`Fetching events for date ${date} from ${timeMin} to ${timeMax}`);
-    const response = await calendar.events.list({
+    const eventsResponse = await calendar.events.list({
       calendarId: LEADERSHIP_CALENDAR_ID,
       timeMin: timeMin,
       timeMax: timeMax,
@@ -55,12 +55,12 @@ app.post('/api/timeslots', async (req, res) => {
       orderBy: "startTime",
     });
 
-    const bookedSlots = response.data.items || [];
+    const bookedSlots = eventsResponse.data.items || [];
     console.log('Booked slots:', bookedSlots.map(event => ({
       summary: event.summary,
       start: event.start.dateTime,
       end: event.end.dateTime,
-      room: event.summary.includes("Fayetteville") ? "fayetteville" : event.summary.includes("Rogers") ? "rogers" : null
+      room: event.summary && event.summary.includes("Fayetteville") ? "fayetteville" : event.summary && event.summary.includes("Rogers") ? "rogers" : null
     })));
 
     const timeSlots = [
@@ -112,9 +112,9 @@ app.post('/api/book', async (req, res) => {
 
   try {
     // Check if the slot is already booked before creating the event
-    const timeMin = new Date(date + "T00:00:00").toISOString();
-    const timeMax = new Date(date + "T23:59:59").toISOString();
-    const response = await calendar.events.list({
+    const timeMin = new Date(date + "T00:00:00-05:00").toISOString();
+    const timeMax = new Date(date + "T23:59:59-05:00").toISOString();
+    const eventsResponse = await calendar.events.list({
       calendarId: LEADERSHIP_CALENDAR_ID,
       timeMin: timeMin,
       timeMax: timeMax,
@@ -122,7 +122,7 @@ app.post('/api/book', async (req, res) => {
       orderBy: "startTime",
     });
 
-    const bookedSlots = response.data.items || [];
+    const bookedSlots = eventsResponse.data.items || [];
     const slotStart = convertTimeSlotToISO(date, time);
     const slotEnd = new Date(new Date(slotStart).getTime() + duration * 60000).toISOString();
 
@@ -162,13 +162,13 @@ app.post('/api/book', async (req, res) => {
     };
 
     console.log('Creating event:', event);
-    const response = await calendar.events.insert({
+    const insertResponse = await calendar.events.insert({
       calendarId: LEADERSHIP_CALENDAR_ID,
       resource: event,
     });
 
-    console.log(`Event created successfully: ${response.data.id}`);
-    res.json({ success: true, eventId: response.data.id });
+    console.log(`Event created successfully: ${insertResponse.data.id}`);
+    res.json({ success: true, eventId: insertResponse.data.id });
   } catch (error) {
     console.error("Error creating event:", error);
     res.status(500).json({ error: 'Failed to create booking' });
