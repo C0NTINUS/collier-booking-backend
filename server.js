@@ -9,37 +9,35 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Write credentials to a temporary file
-const credentialsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
-console.log('GOOGLE_APPLICATION_CREDENTIALS_JSON:', credentialsJson);
+// Log the environment variable to debug
+console.log('GOOGLE_APPLICATION_CREDENTIALS_JSON:', process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
 
+// Parse credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON
 let credentials;
 try {
-  credentials = JSON.parse(credentialsJson);
+  credentials = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
   console.log('Parsed credentials:', credentials);
 } catch (error) {
   console.error('Error parsing GOOGLE_APPLICATION_CREDENTIALS_JSON:', error);
   throw error;
 }
 
-// Write credentials to a temporary file
-const tempCredentialsPath = path.join('/tmp', 'gcloud-credentials.json');
-try {
-  fs.writeFileSync(tempCredentialsPath, JSON.stringify(credentials));
-  console.log('Credentials written to:', tempCredentialsPath);
-  process.env.GOOGLE_APPLICATION_CREDENTIALS = tempCredentialsPath;
-} catch (error) {
-  console.error('Error writing credentials to temporary file:', error);
-  throw error;
-}
+// Use credentials directly in OAuth2
+const auth = new google.auth.OAuth2(
+  credentials.client_id,
+  credentials.client_secret,
+  'https://localhost'
+);
 
-const auth = new google.auth.GoogleAuth({
-  scopes: ['https://www.googleapis.com/auth/calendar.readonly']
+// Set the refresh token
+auth.setCredentials({
+  refresh_token: credentials.refresh_token
 });
 
 const calendar = google.calendar({ version: 'v3', auth });
 const LEADERSHIP_CALENDAR_ID = 'c_b297b4d19f4d0022e12fcc5722dabb4e95f0e04c98a100ee873b6fb02cb1b666@group.calendar.google.com';
 
+// Endpoint to fetch available time slots
 app.post('/api/timeslots', async (req, res) => {
   const { date, room, duration } = req.body;
 
@@ -83,6 +81,44 @@ app.post('/api/timeslots', async (req, res) => {
   } catch (error) {
     console.error("Error fetching events:", error);
     res.status(500).json({ error: 'Failed to fetch time slots' });
+  }
+});
+
+// Endpoint to book a time slot
+app.post('/api/book', async (req, res) => {
+  const { date, time, room, duration, agentName, email, description } = req.body;
+
+  if (!date || !time || !room || !duration || !agentName || !email || !description) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  try {
+    const startTime = convertTimeSlotToISO(date, time);
+    const endTime = new Date(new Date(startTime).getTime() + duration * 60000).toISOString();
+
+    const event = {
+      summary: `Booking - ${room.charAt(0).toUpperCase() + room.slice(1)} Office - Agent: ${agentName} - ${description}`,
+      description: `Agent: ${agentName}\nEmail: ${email}\nPurpose: ${description}`,
+      start: {
+        dateTime: startTime,
+        timeZone: 'America/Chicago',
+      },
+      end: {
+        dateTime: endTime,
+        timeZone: 'America/Chicago',
+      },
+      attendees: [{ email }],
+    };
+
+    const response = await calendar.events.insert({
+      calendarId: LEADERSHIP_CALENDAR_ID,
+      resource: event,
+    });
+
+    res.json({ success: true, eventId: response.data.id });
+  } catch (error) {
+    console.error("Error creating event:", error);
+    res.status(500).json({ error: 'Failed to create booking' });
   }
 });
 
