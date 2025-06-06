@@ -212,17 +212,26 @@ app.post('/api/book', async (req, res) => {
           dateTime: endTime,
           timeZone: 'America/Chicago',
         },
-        attendees: [{ email }],
+        attendees: [
+          {
+            email: email,
+            displayName: agentName,
+            responseStatus: 'needsAction', // Invites the agent, awaiting their response
+          },
+        ],
         visibility: 'default',
+        sendUpdates: 'all', // Ensures notifications are sent to attendees
       };
 
       console.log('Creating event:', event);
       insertResponse = await calendar.events.insert({
         calendarId: LEADERSHIP_CALENDAR_ID,
         resource: event,
+        sendNotifications: true, // Sends calendar invite email to attendees
       });
 
       console.log(`Event created successfully: ${insertResponse.data.id}`);
+      console.log(`Calendar invite sent to ${email}`);
     }
 
     // Final check to ensure no duplicates
@@ -275,7 +284,7 @@ app.post('/api/book', async (req, res) => {
       console.error('Insufficient permissions to create events on this calendar.');
       return res.status(403).json({ error: 'Insufficient permissions to create events on this calendar.' });
     }
-    res.status(500).json({ error: 'Failed to create booking' });
+    res.status(500).json({ error: 'Failed to create booking or send calendar invite' });
   }
 });
 
